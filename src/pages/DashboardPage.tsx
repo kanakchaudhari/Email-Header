@@ -45,13 +45,13 @@ export default function DashboardPage() {
     const saveAnalysis = async () => {
         try {
             const { data, error } = await supabase.from('email_analysis').insert({
-                sender_email: result.sender_email,
-                return_path: result.return_path,
-                subject: result.subject,
-                risk_score: result.risk_score,
-                overall_status: result.overall_status,
-                spoof_detected: result.spoof_detected,
-                raw_header: rawHeaders
+                sender_email: result.sender_email || 'Unknown',
+                return_path: result.return_path || result.sender_email || 'Unknown',
+                subject: result.subject || 'No Subject',
+                risk_score: typeof result.risk_score === 'number' ? result.risk_score : 0,
+                overall_status: result.overall_status || 'Safe',
+                spoof_detected: !!result.spoof_detected,
+                raw_header: rawHeaders || ''
             }).select('id').single();
 
             if (error) throw error;
@@ -60,25 +60,25 @@ export default function DashboardPage() {
 
             await supabase.from('authentication_results').insert({
                 analysis_id: analysisId,
-                spf_status: result.authentication_results.spf,
-                dkim_status: result.authentication_results.dkim,
-                dmarc_status: result.authentication_results.dmarc,
-                arc_status: result.authentication_results.arc
+                spf_status: result.authentication_results?.spf || 'unknown',
+                dkim_status: result.authentication_results?.dkim || 'unknown',
+                dmarc_status: result.authentication_results?.dmarc || 'unknown',
+                arc_status: result.authentication_results?.arc || 'unknown'
             });
 
             await supabase.from('routing_information').insert({
                 analysis_id: analysisId,
-                received_chain: result.routing_information.received_chain,
-                originating_ip: result.routing_information.originating_ip,
-                hop_count: result.routing_information.hop_count
+                received_chain: result.routing_information?.received_chain || [],
+                originating_ip: result.routing_information?.originating_ip || 'Unknown',
+                hop_count: result.routing_information?.hop_count || 0
             });
 
-            if (result.security_findings && result.security_findings.length > 0) {
+            if (result.security_findings && Array.isArray(result.security_findings) && result.security_findings.length > 0) {
                 const findingsToInsert = result.security_findings.map((f: any) => ({
                     analysis_id: analysisId,
-                    severity: f.severity,
-                    finding: f.finding,
-                    recommendation: f.recommendation
+                    severity: f.severity || 'Info',
+                    finding: f.finding || '',
+                    recommendation: f.recommendation || ''
                 }));
                 await supabase.from('security_findings').insert(findingsToInsert);
             }

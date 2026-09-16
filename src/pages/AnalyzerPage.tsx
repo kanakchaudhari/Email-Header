@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Upload, FileCode2, Play, FileText } from 'lucide-react';
 import { toast } from 'sonner';
 import * as pdfjsLib from 'pdfjs-dist';
+import { parseEmailText } from '../lib/emailParser';
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
@@ -24,27 +25,26 @@ export default function AnalyzerPage() {
     
     setIsLoading(true);
     try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ headers: textToAnalyze })
-      });
-      
-      const contentType = res.headers.get('content-type') || '';
-      let data: any = {};
-      
-      if (contentType.includes('application/json')) {
-        data = await res.json();
-      } else {
-        const text = await res.text();
-        if (res.status === 401 || text.includes('Protected deployment') || text.includes('vercel_auth')) {
-          throw new Error('Vercel Deployment Protection is active. Please disable Vercel Authentication in project settings.');
+      let data: any = null;
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ headers: textToAnalyze })
+        });
+        if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+          data = await res.json();
         }
-        throw new Error(`Server returned non-JSON response (${res.status})`);
+      } catch (apiErr) {
+        console.warn('API endpoint unavailable, using client-side header parser:', apiErr);
       }
 
-      if (!res.ok) {
-        throw new Error(data.error?.message || data.error || data.message || 'Failed to analyze email headers');
+      // If backend API returns incomplete or fallback data, use smart client-side parser
+      if (!data || !data.sender_email || data.sender_email === 'None' || data.sender_email === 'Unknown') {
+        const parsed = parseEmailText(textToAnalyze);
+        if (!data || parsed.sender_email !== 'Unknown') {
+          data = parsed;
+        }
       }
       
       // Navigate to dashboard and pass data in state
@@ -90,7 +90,18 @@ Message-ID: <123456789@example.com>`;
         for (let i = 1; i <= pdf.numPages; i++) {
           const page = await pdf.getPage(i);
           const textContent = await page.getTextContent();
-          const pageText = textContent.items.map((item: any) => item.str).join(' ');
+          
+          let lastY: number | null = null;
+          let pageText = '';
+          for (const item of textContent.items as any[]) {
+            if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+              pageText += '\n';
+            } else if (pageText && !pageText.endsWith('\n') && !pageText.endsWith(' ')) {
+              pageText += ' ';
+            }
+            pageText += item.str;
+            lastY = item.transform[5];
+          }
           extractedText += pageText + '\n';
         }
         
