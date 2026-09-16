@@ -230,15 +230,35 @@ async def analyze_headers(data: AnalyzeRequest):
     elif risk_score > 0:
         overall_status = 'Low'
 
+    # Structured Received hops
+    parsed_hops = []
+    for idx, raw_hop in enumerate(received_chain):
+        clean_hop = re.sub(r'\s+', ' ', raw_hop).strip()
+        from_m = re.search(r'from\s+([^\s;]+(?:\s+\([^)]+\))?)', clean_hop, re.IGNORECASE)
+        by_m = re.search(r'by\s+([^\s;]+)', clean_hop, re.IGNORECASE)
+        with_m = re.search(r'with\s+([^\s;]+)', clean_hop, re.IGNORECASE)
+        date_m = re.search(r';\s*([^\n\r]+)$', clean_hop)
+        ip_m = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', clean_hop)
+
+        parsed_hops.append({
+            "hop": idx + 1,
+            "from": from_m.group(1).strip() if from_m else "Unknown Host",
+            "by": by_m.group(1).strip() if by_m else "Unknown Receiver",
+            "withProtocol": with_m.group(1).strip() if with_m else "Standard SMTP",
+            "date": date_m.group(1).strip() if date_m else "N/A",
+            "ip": ip_m.group(0) if ip_m else "N/A",
+            "raw": clean_hop
+        })
+
     parsed_headers = {}
     for key, val in msg.items():
         if key in parsed_headers:
             if isinstance(parsed_headers[key], list):
-                parsed_headers[key].append(val)
+                parsed_headers[key].append(str(val))
             else:
-                parsed_headers[key] = [parsed_headers[key], val]
+                parsed_headers[key] = f"{parsed_headers[key]}\n{val}"
         else:
-            parsed_headers[key] = val
+            parsed_headers[key] = str(val)
 
     if "From" not in parsed_headers and from_email_addr:
         parsed_headers["From"] = from_raw or from_email_addr
@@ -247,9 +267,18 @@ async def analyze_headers(data: AnalyzeRequest):
     if "Return-Path" not in parsed_headers and return_path_email:
         parsed_headers["Return-Path"] = return_path_email
 
+    recipient = msg.get("To", parsed_headers.get("To", None))
+    date_val = msg.get("Date", parsed_headers.get("Date", None))
+    msg_id = msg.get("Message-ID", parsed_headers.get("Message-ID", None))
+    reply_to = msg.get("Reply-To", parsed_headers.get("Reply-To", None))
+
     return {
         "sender_email": from_email_addr or from_raw or "Unknown",
         "return_path": return_path_email or from_email_addr or "Unknown",
+        "recipient": recipient,
+        "date": date_val,
+        "message_id": msg_id,
+        "reply_to": reply_to,
         "subject": subject or "No Subject",
         "risk_score": min(risk_score, 100),
         "overall_status": overall_status,
@@ -263,8 +292,10 @@ async def analyze_headers(data: AnalyzeRequest):
         "routing_information": {
             "received_chain": received_chain,
             "originating_ip": originating_ip,
-            "hop_count": len(received_chain)
+            "hop_count": len(received_chain),
+            "parsed_hops": parsed_hops
         },
         "security_findings": findings,
         "parsed_headers": parsed_headers
     }
+
