@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ShieldAlert, ShieldCheck, Shield, AlertTriangle, ArrowLeft, Mail, Network, Search, AlertOctagon } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, Shield, AlertTriangle, ArrowLeft, Mail, AlertOctagon } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { toast } from 'sonner';
@@ -39,7 +39,8 @@ export default function DashboardPage() {
         } else if (!saved) {
             saveAnalysis();
         }
-    }, [result]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [result, saved]);
 
     const saveAnalysis = async () => {
         try {

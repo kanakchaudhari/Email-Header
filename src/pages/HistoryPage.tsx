@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { Trash2, ExternalLink, Calendar, Mail, ShieldAlert } from 'lucide-react';
+import { Trash2, ExternalLink, Calendar } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function HistoryPage() {
@@ -39,6 +39,7 @@ export default function HistoryPage() {
             setHistory(prev => prev.filter(item => item.id !== id));
             toast.success('Record deleted');
         } catch (error: any) {
+            console.error('Delete error:', error);
             toast.error('Failed to delete record');
         }
     };
@@ -85,6 +86,7 @@ export default function HistoryPage() {
 
             navigate('/dashboard', { state: { result: resultObj, rawHeaders: item.raw_header } });
         } catch (err: any) {
+            console.error('View details error:', err);
             toast.error('Failed to load analysis details');
         }
     };

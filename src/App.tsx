@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom';
-import { ShieldCheck, History, Activity, FileText } from 'lucide-react';
+import React from 'react';
+import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
+import { ShieldCheck, History, FileText } from 'lucide-react';
 import { Toaster } from 'sonner';
 
 import AnalyzerPage from './pages/AnalyzerPage';
