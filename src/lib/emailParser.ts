@@ -39,12 +39,59 @@ export interface AnalysisResult {
   parsed_headers: Record<string, string>;
 }
 
+export function decodeMimeHeader(headerStr: string): string {
+  if (!headerStr) return '';
+  return headerStr.replace(/=\?([^?]+)\?([QBqb])\?([^?]+)\?=/gi, (match, charset, encoding, text) => {
+    try {
+      const enc = encoding.toUpperCase();
+      if (enc === 'Q') {
+        const str = text.replace(/_/g, ' ');
+        const bytes: number[] = [];
+        for (let i = 0; i < str.length; i++) {
+          if (str[i] === '=' && i + 2 < str.length) {
+            const hex = str.substring(i + 1, i + 3);
+            const byte = parseInt(hex, 16);
+            if (!isNaN(byte)) {
+              bytes.push(byte);
+              i += 2;
+              continue;
+            }
+          }
+          bytes.push(str.charCodeAt(i));
+        }
+        return new TextDecoder(charset || 'utf-8').decode(new Uint8Array(bytes));
+      } else if (enc === 'B') {
+        const binary = atob(text);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return new TextDecoder(charset || 'utf-8').decode(bytes);
+      }
+    } catch {
+      return match;
+    }
+    return match;
+  });
+}
+
+function getRootDomain(domain: string): string {
+  if (!domain) return '';
+  const parts = domain.toLowerCase().split('.').filter(Boolean);
+  if (parts.length <= 2) return domain.toLowerCase();
+  return parts.slice(-2).join('.');
+}
+
 export function parseEmailText(rawText: string): AnalysisResult {
   const text = rawText.trim();
-  const lowerText = text.toLowerCase();
+  
+  // Extract Header Section if double newline is present (e.g. .eml format with body)
+  const doubleNewlineIdx = text.search(/\r?\n\r?\n/);
+  const headerText = doubleNewlineIdx !== -1 ? text.substring(0, doubleNewlineIdx) : text;
+  const lowerHeaderText = headerText.toLowerCase();
 
   // 0. PARSE ALL KEY-VALUE HEADERS
-  const unfoldedText = rawText.replace(/\r?\n[ \t]+/g, ' ');
+  const unfoldedText = headerText.replace(/\r?\n[ \t]+/g, ' ');
   const headerLines = unfoldedText.split(/\r?\n/);
   const parsedHeaders: Record<string, string> = {};
 
@@ -52,7 +99,7 @@ export function parseEmailText(rawText: string): AnalysisResult {
     const colonIdx = line.indexOf(':');
     if (colonIdx > 0) {
       const key = line.substring(0, colonIdx).trim();
-      const val = line.substring(colonIdx + 1).trim();
+      const val = decodeMimeHeader(line.substring(colonIdx + 1).trim());
       if (key && !key.includes(' ') && !key.includes('\t')) {
         if (parsedHeaders[key]) {
           parsedHeaders[key] += '\n' + val;
@@ -66,37 +113,37 @@ export function parseEmailText(rawText: string): AnalysisResult {
   // 1. EXTRACT SUBJECT
   let subject = parsedHeaders['Subject'] || parsedHeaders['subject'] || "";
   if (!subject) {
-    const subjMatch = text.match(/(?:Subject|subject):\s*([^\n\r]+)/i);
+    const subjMatch = headerText.match(/(?:Subject|subject):\s*([^\n\r]+)/i);
     if (subjMatch) {
-      subject = subjMatch[1].trim();
+      subject = decodeMimeHeader(subjMatch[1].trim());
     } else {
-      const gmailSubjMatch = text.match(/Gmail\s*-\s*([^\n\r]+)/i);
+      const gmailSubjMatch = headerText.match(/Gmail\s*-\s*([^\n\r]+)/i);
       if (gmailSubjMatch) {
-        subject = gmailSubjMatch[1].trim();
+        subject = decodeMimeHeader(gmailSubjMatch[1].trim());
       }
     }
   }
   if (!subject && headerLines.length > 0) {
     if (!headerLines[0].includes(":") && !headerLines[0].includes("@")) {
-      subject = headerLines[0];
+      subject = decodeMimeHeader(headerLines[0]);
     }
   }
 
   // 2. EXTRACT FROM (DECLARED SENDER)
   let fromRaw = parsedHeaders['From'] || parsedHeaders['from'] || "";
   if (!fromRaw) {
-    const fromMatch = text.match(/(?:From|from):\s*([^\n\r]+)/);
+    const fromMatch = headerText.match(/(?:From|from):\s*([^\n\r]+)/);
     if (fromMatch) {
-      fromRaw = fromMatch[1].trim();
+      fromRaw = decodeMimeHeader(fromMatch[1].trim());
     } else {
       for (const line of headerLines.slice(0, 15)) {
         if (line.includes("<") && line.includes(">") && line.includes("@") && !line.toLowerCase().startsWith("to:")) {
-          fromRaw = line;
+          fromRaw = decodeMimeHeader(line);
           break;
         }
       }
       if (!fromRaw) {
-        const allEmails = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+        const allEmails = headerText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
         if (allEmails && allEmails.length > 0) {
           fromRaw = allEmails[0];
         }
@@ -116,11 +163,11 @@ export function parseEmailText(rawText: string): AnalysisResult {
   // 3. EXTRACT RETURN-PATH (ACTUAL SENDER)
   let returnPathRaw = parsedHeaders['Return-Path'] || parsedHeaders['return-path'] || "";
   if (!returnPathRaw) {
-    const rpMatch = text.match(/(?:Return-Path|return-path):\s*<?([^>\s\n\r]+)>?/i);
+    const rpMatch = headerText.match(/(?:Return-Path|return-path):\s*<?([^>\s\n\r]+)>?/i);
     if (rpMatch) {
       returnPathRaw = rpMatch[1].trim();
     } else {
-      const mailedMatch = text.match(/mailed-by:\s*([^\s\n\r]+)/i);
+      const mailedMatch = headerText.match(/mailed-by:\s*([^\s\n\r]+)/i);
       if (mailedMatch) {
         const mailedDomain = mailedMatch[1].trim();
         if (senderEmail && senderEmail.toLowerCase().includes(mailedDomain.toLowerCase())) {
@@ -144,13 +191,12 @@ export function parseEmailText(rawText: string): AnalysisResult {
 
   // 4. AUTHENTICATION RESULTS PARSING (SPF, DKIM, DMARC, ARC)
   let spf = 'unknown';
-  // Check Received-SPF or Authentication-Results header or raw text
   const spfHeader = parsedHeaders['Received-SPF'] || parsedHeaders['received-spf'] || '';
-  const authHeader = parsedHeaders['Authentication-Results'] || parsedHeaders['authentication-results'] || '';
+  const authHeader = parsedHeaders['Authentication-Results'] || parsedHeaders['authentication-results'] || parsedHeaders['ARC-Authentication-Results'] || '';
   
-  const spfValMatch = (spfHeader + ' ' + authHeader + ' ' + text).match(/spf=([^\s;()]+)/i) || 
-                      (spfHeader + ' ' + text).match(/Received-SPF:\s*([a-z]+)/i) ||
-                      lowerText.match(/spf:\s*([a-z]+)/i);
+  const spfValMatch = (spfHeader + ' ' + authHeader + ' ' + headerText).match(/spf=([^\s;()]+)/i) || 
+                      (spfHeader + ' ' + headerText).match(/Received-SPF:\s*([a-z]+)/i) ||
+                      lowerHeaderText.match(/spf:\s*([a-z]+)/i);
   if (spfValMatch) {
     const val = spfValMatch[1].toLowerCase();
     if (['pass', 'fail', 'softfail', 'neutral', 'none'].includes(val)) {
@@ -158,17 +204,17 @@ export function parseEmailText(rawText: string): AnalysisResult {
     }
   }
   if (spf === 'unknown') {
-    if (lowerText.includes('mailed-by:') || lowerText.includes('spf=pass') || lowerText.includes('spf: pass') || lowerText.includes('received-spf: pass')) {
+    if (lowerHeaderText.includes('mailed-by:') || lowerHeaderText.includes('spf=pass') || lowerHeaderText.includes('spf: pass') || lowerHeaderText.includes('received-spf: pass')) {
       spf = 'pass';
-    } else if (lowerText.includes('spf=fail') || lowerText.includes('spf: fail') || lowerText.includes('received-spf: fail')) {
+    } else if (lowerHeaderText.includes('spf=fail') || lowerHeaderText.includes('spf: fail') || lowerHeaderText.includes('received-spf: fail')) {
       spf = 'fail';
-    } else if (lowerText.includes('spf=softfail') || lowerText.includes('spf: softfail')) {
+    } else if (lowerHeaderText.includes('spf=softfail') || lowerHeaderText.includes('spf: softfail')) {
       spf = 'softfail';
     }
   }
 
   let dkim = 'unknown';
-  const dkimValMatch = (authHeader + ' ' + text).match(/dkim=([^\s;()]+)/i) || lowerText.match(/dkim:\s*([a-z]+)/i);
+  const dkimValMatch = (authHeader + ' ' + headerText).match(/dkim=([^\s;()]+)/i) || lowerHeaderText.match(/dkim:\s*([a-z]+)/i);
   if (dkimValMatch) {
     const val = dkimValMatch[1].toLowerCase();
     if (['pass', 'fail', 'neutral', 'none'].includes(val)) {
@@ -176,15 +222,15 @@ export function parseEmailText(rawText: string): AnalysisResult {
     }
   }
   if (dkim === 'unknown') {
-    if (parsedHeaders['DKIM-Signature'] || parsedHeaders['dkim-signature'] || lowerText.includes('signed-by:') || lowerText.includes('dkim=pass') || lowerText.includes('dkim: pass')) {
+    if (parsedHeaders['DKIM-Signature'] || parsedHeaders['dkim-signature'] || lowerHeaderText.includes('signed-by:') || lowerHeaderText.includes('dkim=pass') || lowerHeaderText.includes('dkim: pass')) {
       dkim = 'pass';
-    } else if (lowerText.includes('dkim=fail') || lowerText.includes('dkim: fail')) {
+    } else if (lowerHeaderText.includes('dkim=fail') || lowerHeaderText.includes('dkim: fail')) {
       dkim = 'fail';
     }
   }
 
   let dmarc = 'unknown';
-  const dmarcValMatch = (authHeader + ' ' + text).match(/dmarc=([^\s;()]+)/i) || lowerText.match(/dmarc:\s*([a-z]+)/i);
+  const dmarcValMatch = (authHeader + ' ' + headerText).match(/dmarc=([^\s;()]+)/i) || lowerHeaderText.match(/dmarc:\s*([a-z]+)/i);
   if (dmarcValMatch) {
     const val = dmarcValMatch[1].toLowerCase();
     if (['pass', 'fail', 'none'].includes(val)) {
@@ -192,15 +238,15 @@ export function parseEmailText(rawText: string): AnalysisResult {
     }
   }
   if (dmarc === 'unknown') {
-    if (lowerText.includes('dmarc=pass') || lowerText.includes('dmarc: pass') || (lowerText.includes('mailed-by:') && lowerText.includes('signed-by:'))) {
+    if (lowerHeaderText.includes('dmarc=pass') || lowerHeaderText.includes('dmarc: pass') || (lowerHeaderText.includes('mailed-by:') && lowerHeaderText.includes('signed-by:'))) {
       dmarc = 'pass';
-    } else if (lowerText.includes('dmarc=fail') || lowerText.includes('dmarc: fail')) {
+    } else if (lowerHeaderText.includes('dmarc=fail') || lowerHeaderText.includes('dmarc: fail')) {
       dmarc = 'fail';
     }
   }
 
   let arc = 'unknown';
-  const arcValMatch = (authHeader + ' ' + text).match(/arc=([^\s;()]+)/i);
+  const arcValMatch = (authHeader + ' ' + headerText).match(/arc=([^\s;()]+)/i);
   if (arcValMatch) {
     const val = arcValMatch[1].toLowerCase();
     if (['pass', 'fail', 'none'].includes(val)) {
@@ -208,14 +254,14 @@ export function parseEmailText(rawText: string): AnalysisResult {
     }
   }
   if (arc === 'unknown') {
-    if (parsedHeaders['ARC-Seal'] || parsedHeaders['ARC-Message-Signature'] || lowerText.includes('arc=pass') || lowerText.includes('security:') || lowerText.includes('tls')) {
+    if (parsedHeaders['ARC-Seal'] || parsedHeaders['ARC-Message-Signature'] || lowerHeaderText.includes('arc=pass') || lowerHeaderText.includes('security:') || lowerHeaderText.includes('tls')) {
       arc = 'pass';
     }
   }
 
   // 5. ROUTING & IP PARSING
   const receivedChain: string[] = [];
-  const recMatches = text.match(/Received:[^\n\r]+(?:\n\s+[^\n\r]+)*/gi);
+  const recMatches = headerText.match(/Received:[^\n\r]+(?:\n\s+[^\n\r]+)*/gi);
   if (recMatches) {
     receivedChain.push(...recMatches.map(r => r.replace(/\s+/g, ' ').trim()));
   }
@@ -239,7 +285,7 @@ export function parseEmailText(rawText: string): AnalysisResult {
     };
   });
 
-  const allIps = text.match(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g) || [];
+  const allIps = headerText.match(/\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g) || [];
   let originatingIp = 'Unknown';
   for (const ip of allIps) {
     if (!ip.startsWith('127.') && !ip.startsWith('10.') && !ip.startsWith('192.168.') && ip !== '0.0.0.0') {
@@ -289,7 +335,10 @@ export function parseEmailText(rawText: string): AnalysisResult {
   if (senderEmail && returnPath) {
     const fromDomain = senderEmail.split('@').pop()?.toLowerCase() || '';
     const returnDomain = returnPath.split('@').pop()?.toLowerCase() || '';
-    if (fromDomain && returnDomain && !fromDomain.includes(returnDomain) && !returnDomain.includes(fromDomain)) {
+    const rootFrom = getRootDomain(fromDomain);
+    const rootReturn = getRootDomain(returnDomain);
+
+    if (rootFrom && rootReturn && rootFrom !== rootReturn && !fromDomain.includes(returnDomain) && !returnDomain.includes(fromDomain)) {
       if (spf !== 'pass') {
         riskScore += 50;
         spoofDetected = true;
@@ -302,7 +351,7 @@ export function parseEmailText(rawText: string): AnalysisResult {
     }
   }
 
-  if (lowerText.includes('mailed-by:') || lowerText.includes('signed-by:')) {
+  if (lowerHeaderText.includes('mailed-by:') || lowerHeaderText.includes('signed-by:')) {
     findings.push({
       severity: 'Info',
       finding: 'Parsed layout from Printed Email PDF (Gmail/Webmail print headers).',
@@ -343,4 +392,5 @@ export function parseEmailText(rawText: string): AnalysisResult {
     parsed_headers: parsedHeaders
   };
 }
+
 

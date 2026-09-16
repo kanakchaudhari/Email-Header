@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import email
+from email.header import decode_header, make_header
 import re
 
 app = FastAPI()
@@ -18,13 +19,29 @@ class AnalyzeRequest(BaseModel):
     headers: str
 
 def extract_ip(text: str) -> str:
-    # Look for IPv4 addresses
     matches = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', text)
     for ip in matches:
-        # Exclude local/loopback IPs if possible
         if not (ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168.") or ip == "0.0.0.0"):
             return ip
     return matches[0] if matches else 'Unknown'
+
+def decode_mime_header(header_str: str) -> str:
+    if not header_str:
+        return ""
+    try:
+        decoded_header = make_header(decode_header(header_str))
+        return str(decoded_header)
+    except Exception:
+        return header_str
+
+def get_root_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    parts = [p for p in domain.lower().split(".") if p]
+    if len(parts) <= 2:
+        return domain.lower()
+    return ".".join(parts[-2:])
+
 
 @app.post("/api/analyze")
 @app.post("/analyze")
@@ -42,16 +59,17 @@ async def analyze_headers(data: AnalyzeRequest):
     # -------------------------------------------------------------
     # 1. EXTRACT SUBJECT
     # -------------------------------------------------------------
-    subject = msg.get("Subject", "").strip()
+    subject = decode_mime_header(msg.get("Subject", "")).strip()
     if not subject:
         subject_match = re.search(r'(?:Subject|subject):\s*([^\n\r]+)', raw_headers)
         if subject_match:
-            subject = subject_match.group(1).strip()
+            subject = decode_mime_header(subject_match.group(1).strip())
     if not subject:
         # Check for Gmail print title "Gmail - Subject Title"
         gmail_match = re.search(r'Gmail\s*-\s*([^\n\r]+)', raw_headers, re.IGNORECASE)
         if gmail_match:
-            subject = gmail_match.group(1).strip()
+            subject = decode_mime_header(gmail_match.group(1).strip())
+
 
     # -------------------------------------------------------------
     # 2. EXTRACT FROM (DECLARED SENDER)
@@ -211,11 +229,14 @@ async def analyze_headers(data: AnalyzeRequest):
     if from_email_addr and return_path_email:
         from_domain = from_email_addr.split('@')[-1].lower() if '@' in from_email_addr else ""
         return_domain = return_path_email.split('@')[-1].lower() if '@' in return_path_email else ""
-        if from_domain and return_domain and from_domain not in return_domain and return_domain not in from_domain:
+        root_from = get_root_domain(from_domain)
+        root_return = get_root_domain(return_domain)
+        if root_from and root_return and root_from != root_return and from_domain not in return_domain and return_domain not in from_domain:
             if spf_status != 'pass':
                 risk_score += 50
                 spoof_detected = True
                 findings.append({"severity": "Critical", "finding": f"Domain Mismatch: From ({from_domain}) differs from Return-Path ({return_domain})", "recommendation": "High risk of email spoofing."})
+
 
     if "mailed-by:" in raw_headers.lower() or "signed-by:" in raw_headers.lower():
         findings.append({"severity": "Info", "finding": "Parsed layout from Printed Email PDF (Gmail/Webmail print format).", "recommendation": "Extracted verified fields from print headers."})
